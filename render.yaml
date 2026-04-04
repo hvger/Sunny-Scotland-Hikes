@@ -1,0 +1,45 @@
+# render.yaml
+# -----------
+# Defines both services in one file so Render deploys them together.
+# Commit this to the ROOT of your GitHub repository.
+#
+# Repository structure expected:
+#   /
+#   ├── render.yaml            <- this file
+#   ├── backend/
+#   │   ├── main.py
+#   │   ├── requirements.txt
+#   │   └── scotland.geojson
+#   └── frontend/
+#       ├── src/
+#       ├── package.json
+#       └── ...
+
+services:
+
+  # --- Python FastAPI backend ---
+  - type: web
+    name: scotland-weather-api
+    env: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: FRONTEND_URL
+        value: https://scotland-weather.onrender.com  # update to your frontend URL
+
+  # --- React frontend (static site) ---
+  - type: web
+    name: scotland-weather
+    env: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist           # use "build" if you're using Create React App
+    envVars:
+      - key: VITE_API_URL             # use REACT_APP_API_URL for Create React App
+        value: https://scotland-weather-api.onrender.com
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html      # needed for React Router if you use it
