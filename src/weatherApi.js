@@ -22,9 +22,11 @@
 // This function converts that into the { hourlyGrids, lats, lons } format
 // that the rest of App.jsx expects.
 
-const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
-// If you're using Create React App instead of Vite, use:
-// const API_URL = process.env.REACT_APP_API_URL ?? "http://localhost:8000";
+export async function fetchWeatherGrid() {
+  const res = await fetch("/cloud-cover");
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
 
 export async function fetchWeatherGrid() {
   const res = await fetch(`${API_URL}/cloud-cover`);

@@ -26,6 +26,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from shapely.geometry import shape, Point
 from shapely.ops import unary_union
 
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -367,6 +370,13 @@ def grid_preview():
             for lat, lon in land_points
         ],
     }
+
+# Serve the React frontend from the dist folder baked in at Docker build time.
+# The catch-all mount must come last — after all API routes — otherwise it
+# swallows requests to /cloud-cover, /health, etc.
+_dist = Path(__file__).parent / "dist"
+if _dist.exists():
+    app.mount("/", StaticFiles(directory=_dist, html=True), name="frontend")
 
 
 if __name__ == "__main__":
