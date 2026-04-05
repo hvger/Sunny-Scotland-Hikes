@@ -22,20 +22,14 @@
 // This function converts that into the { hourlyGrids, lats, lons } format
 // that the rest of App.jsx expects.
 
-export async function fetchWeatherGrid() {
-  const res = await fetch("/cloud-cover");
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
-}
+const API_URL = import.meta.env.VITE_API_URL ?? "";
 
 export async function fetchWeatherGrid() {
   const res = await fetch(`${API_URL}/cloud-cover`);
-
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(`Backend error ${res.status}: ${err.detail ?? res.statusText}`);
   }
-
   const body = await res.json();
   const {
     step,
@@ -48,14 +42,13 @@ export async function fetchWeatherGrid() {
   const latSet = new Set();
   const lonSet = new Set();
   hourly_points[0].forEach(({ lat, lon }) => { latSet.add(lat); lonSet.add(lon); });
-
   const lats = Array.from(latSet).sort((a, b) => a - b);
   const lons = Array.from(lonSet).sort((a, b) => a - b);
 
   const latIndex = Object.fromEntries(lats.map((v, i) => [v, i]));
   const lonIndex = Object.fromEntries(lons.map((v, i) => [v, i]));
 
-  const hourlyGrids = hourly_points.map(points =>
+  const hourlyGrids = hourly_points.map(() =>
     lats.map(() => new Array(lons.length).fill(100))
   );
 
