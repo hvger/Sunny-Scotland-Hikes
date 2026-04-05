@@ -339,7 +339,7 @@ function MouseTracker({ weatherData, maxCloud, filterAscMin, filterAscMax, filte
       }
       const cx = e.originalEvent.clientX, cy = e.originalEvent.clientY;
       const hill = pickSunnyHillAtScreen(map, weatherData, maxCloud, filterAscMin, filterAscMax, filterRatMin, filterRatMax, cx, cy, 14);
-      onHillClick(hill);
+      onHillClick(hill, cx, cy);
     },
   });
   return null;
@@ -439,7 +439,42 @@ function DualRangeSlider({ minBound, maxBound, step, low, high, onChange, minLab
   );
 }
 
-function HillDetailPanel({ hill, onClose }) {
+function useDraggable({ x: initX = 316, y: initY = 80 } = {}) {
+  const [pos, setPos] = useState({ x: initX, y: initY });
+  const ref = useRef(null);
+  const dragging = useRef(false);
+  const origin = useRef({ mx: 0, my: 0, px: 0, py: 0 });
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const onMouseDown = e => {
+      if (e.button !== 0) return;
+      dragging.current = true;
+      origin.current = { mx: e.clientX, my: e.clientY, px: pos.x, py: pos.y };
+      e.preventDefault();
+    };
+    const onMouseMove = e => {
+      if (!dragging.current) return;
+      const dx = e.clientX - origin.current.mx;
+      const dy = e.clientY - origin.current.my;
+      setPos({ x: origin.current.px + dx, y: origin.current.py + dy });
+    };
+    const onMouseUp = () => { dragging.current = false; };
+    el.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      el.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, [pos.x, pos.y]);
+
+  return { ref, pos, setPos };
+}
+
+function HillDetailPanel({ hill, onClose, dragPos, dragRef }) {
   const accent = hillStyle(hill.category).color;
   const ratingStr = Number.isFinite(hill.userRating) ? hill.userRating.toFixed(2) : "—";
 
@@ -456,8 +491,8 @@ function HillDetailPanel({ hill, onClose }) {
   );
 
   return (
-    <div style={{
-      position: "fixed", left: 1642, top: 0, zIndex: 1100,
+    <div ref={dragRef} style={{
+      position: "fixed", left: dragPos?.x ?? 316, top: dragPos?.y ?? 80, zIndex: 1100,
       width: "min(360px, calc(100vw - 24px))",
       background: "rgba(10,22,36,0.96)", backdropFilter: "blur(14px)",
       border: `1px solid ${accent}55`, borderRadius: 14,
@@ -468,6 +503,7 @@ function HillDetailPanel({ hill, onClose }) {
         padding: "12px 14px 10px", borderBottom: "1px solid rgba(255,255,255,0.08)",
         display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10,
         background: `linear-gradient(135deg, ${accent}18 0%, transparent 55%)`,
+        cursor: "grab",
       }}>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 17, fontWeight: 700, color: accent, fontFamily: "\'DM Serif Display\', Georgia, serif", lineHeight: 1.25 }}>
@@ -518,6 +554,8 @@ export default function App() {
   const [filterRatingMax, setFilterRatingMax] = useState(HILL_METRIC_BOUNDS.ratMax);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [forecastOffset, setForecastOffset] = useState(0);
+  const [hillClickPos, setHillClickPos] = useState(null);
+  const hillDetailDrag = useDraggable({ x: 316, y: 80 });
 
   const loadData = useCallback(() => {
     setLoading(true);
@@ -535,6 +573,29 @@ export default function App() {
     if (!hillPassesMetricFilters(selectedHill, filterAscentsMin, filterAscentsMax, filterRatingMin, filterRatingMax, HILL_METRIC_BOUNDS))
       setSelectedHill(null);
   }, [selectedHill, filterAscentsMin, filterAscentsMax, filterRatingMin, filterRatingMax]);
+
+  useEffect(() => {
+    if (!selectedHill || !hillClickPos) return;
+    const panelWidth = 360;
+    const panelHeight = 280;
+    const margin = 12;
+    const sidebarWidth = sidebarOpen ? 300 : 0;
+
+    let x = hillClickPos.x + margin;
+    let y = hillClickPos.y + margin;
+
+    if (x + panelWidth > window.innerWidth - margin) {
+      x = hillClickPos.x - panelWidth - margin;
+    }
+    if (x < sidebarWidth + margin) {
+      x = sidebarWidth + margin;
+    }
+    if (y + panelHeight > window.innerHeight - margin) {
+      y = window.innerHeight - panelHeight - margin;
+    }
+
+    hillDetailDrag.setPos({ x, y });
+  }, [selectedHill]);
 
   const activeGrid = weatherData?.hourlyGrids?.[forecastOffset] ?? null;
   const activeWeatherData = weatherData
@@ -614,6 +675,7 @@ export default function App() {
         zIndex: 1000,
         flexShrink: 0,
         userSelect: "none",
+        position: "relative",
       }}>
 
         {/* Header */}
@@ -874,37 +936,37 @@ export default function App() {
             : "Open-Meteo · Live data · Scotland"
           }
         </div>
-      </div>
 
-      {/* ── SIDEBAR TOGGLE ── */}
-      <button
-        onClick={() => setSidebarOpen(v => !v)}
-        title={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
-        style={{
-          position: "fixed",
-          left: sidebarOpen ? 810 : 510,
-          top: "50%",
-          transform: "translateY(-50%)",
-          zIndex: 1100,
-          width: 22,
-          height: 44,
-          borderRadius: sidebarOpen ? "0 8px 8px 0" : "8px",
-          border: "1px solid rgba(255,255,255,0.1)",
-          background: "rgba(8,18,32,0.95)",
-          color: "#5a7a9a",
-          cursor: "pointer",
-          fontSize: 12,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          transition: "left 0.25s ease",
-          backdropFilter: "blur(8px)",
-          boxShadow: "2px 0 12px rgba(0,0,0,0.3)",
-          padding: 0,
-        }}
-      >
-        {sidebarOpen ? "‹" : "›"}
-      </button>
+        {/* ── SIDEBAR TOGGLE ── */}
+        <button
+          onClick={() => setSidebarOpen(v => !v)}
+          title={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
+          style={{
+            position: "absolute",
+            right: -22,
+            top: "50%",
+            transform: "translateY(-50%)",
+            zIndex: 1100,
+            width: 22,
+            height: 44,
+            borderRadius: "0 8px 8px 0",
+            border: "1px solid rgba(255,255,255,0.1)",
+            borderLeft: "none",
+            background: "rgba(8,18,32,0.95)",
+            color: "#5a7a9a",
+            cursor: "pointer",
+            fontSize: 12,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            backdropFilter: "blur(8px)",
+            boxShadow: "2px 0 12px rgba(0,0,0,0.3)",
+            padding: 0,
+          }}
+        >
+          {sidebarOpen ? "‹" : "›"}
+        </button>
+      </div>
 
       {/* ── MAP ── */}
       <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
@@ -927,7 +989,7 @@ export default function App() {
         )}
 
         {selectedHill && (
-          <HillDetailPanel hill={selectedHill} onClose={() => setSelectedHill(null)} />
+          <HillDetailPanel hill={selectedHill} onClose={() => setSelectedHill(null)} dragPos={hillDetailDrag.pos} dragRef={hillDetailDrag.ref} />
         )}
 
         {/* Tooltip */}
@@ -994,7 +1056,10 @@ export default function App() {
                 filterRatMin={filterRatingMin}
                 filterRatMax={filterRatingMax}
                 onHover={setHovered}
-                onHillClick={hill => setSelectedHill(hill)}
+                onHillClick={(hill, cx, cy) => {
+                  setSelectedHill(hill);
+                  if (hill) setHillClickPos({ x: cx, y: cy });
+                }}
               />
             </>
           )}
