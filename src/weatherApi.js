@@ -10,11 +10,17 @@
 // {
 //   step: 0.25,
 //   generated_at: "2024-01-01T12:00:00Z",
-//   points: [{ lat, lon, cloud_cover }, ...]
+//   now_hour_utc: 14,
+//   forecast_hours: 11,
+//   hourly_points: [
+//     [{ lat, lon, cloud_cover }, ...],  // offset 0
+//     [{ lat, lon, cloud_cover }, ...],  // offset 1
+//     ...
+//   ]
 // }
 //
-// This function converts that into the { grid, lats, lons } format
-// that the rest of App.jsx already expects — so nothing else needs to change.
+// This function converts that into the { hourlyGrids, lats, lons } format
+// that the rest of App.jsx expects.
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 // If you're using Create React App instead of Vite, use:
@@ -28,33 +34,46 @@ export async function fetchWeatherGrid() {
     throw new Error(`Backend error ${res.status}: ${err.detail ?? res.statusText}`);
   }
 
-  const { step, generated_at, points } = await res.json();
+  const body = await res.json();
+  const {
+    step,
+    generated_at,
+    now_hour_utc,
+    forecast_hours,
+    hourly_points,
+  } = body;
 
-  // Rebuild the lats/lons index arrays and 2-D grid that App.jsx expects.
-  // We derive them from the actual points returned rather than recomputing
-  // the bounding box, so they exactly match what the backend filtered.
   const latSet = new Set();
   const lonSet = new Set();
-  points.forEach(({ lat, lon }) => { latSet.add(lat); lonSet.add(lon); });
+  hourly_points[0].forEach(({ lat, lon }) => { latSet.add(lat); lonSet.add(lon); });
 
   const lats = Array.from(latSet).sort((a, b) => a - b);
   const lons = Array.from(lonSet).sort((a, b) => a - b);
 
-  // Build a lookup for fast index resolution
   const latIndex = Object.fromEntries(lats.map((v, i) => [v, i]));
   const lonIndex = Object.fromEntries(lons.map((v, i) => [v, i]));
 
-  // Initialise grid to 100 (fully overcast) — ocean/unmapped cells stay at 100
-  // which means they'll be invisible when the cloud threshold filter is applied
-  const grid = lats.map(() => new Array(lons.length).fill(100));
+  const hourlyGrids = hourly_points.map(points =>
+    lats.map(() => new Array(lons.length).fill(100))
+  );
 
-  points.forEach(({ lat, lon, cloud_cover }) => {
-    const li = latIndex[lat];
-    const lo = lonIndex[lon];
-    if (li !== undefined && lo !== undefined) {
-      grid[li][lo] = cloud_cover;
-    }
+  hourly_points.forEach((points, offset) => {
+    points.forEach(({ lat, lon, cloud_cover }) => {
+      const li = latIndex[lat];
+      const lo = lonIndex[lon];
+      if (li !== undefined && lo !== undefined) {
+        hourlyGrids[offset][li][lo] = cloud_cover;
+      }
+    });
   });
 
-  return { grid, lats, lons, generated_at };
+  return {
+    hourlyGrids,
+    lats,
+    lons,
+    generated_at,
+    now_hour_utc,
+    forecast_hours,
+    step,
+  };
 }

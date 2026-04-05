@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import React, { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { MapContainer, TileLayer, useMap, useMapEvents } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import hillsCsv from "./all_hills_with_coords.csv?raw";
@@ -86,7 +86,15 @@ function getCloudCoverAtPoint(lat, lon, weatherData) {
 }
 
 // --- Real weather data via Open-Meteo --- Call from backend
-import { fetchWeatherGrid } from "./weatherApi"
+import { fetchWeatherGrid } from "./weatherApi";
+
+/** Open-Meteo hourly times are UTC without a Z suffix */
+function parseMeteoUtc(iso) {
+  if (!iso) return null;
+  const t = String(iso).trim();
+  if (/[zZ]$/.test(t) || /[+-]\d{2}:?\d{2}$/.test(t)) return new Date(t);
+  return new Date(`${t}Z`);
+}
 
 // --- Colour: sunny = vivid golden, cloudy = steel blue, stronger alpha curve ---
 function cloudCoverToRGBA(cover, dimFactor = 1, shimmerBoost = 0) {
@@ -509,12 +517,13 @@ export default function App() {
   const [filterRatingMin, setFilterRatingMin] = useState(HILL_METRIC_BOUNDS.ratMin);
   const [filterRatingMax, setFilterRatingMax] = useState(HILL_METRIC_BOUNDS.ratMax);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [forecastOffset, setForecastOffset] = useState(0);
 
   const loadData = useCallback(() => {
     setLoading(true);
     setError(null);
     fetchWeatherGrid()
-      .then(data => { setWeatherData(data); setLastUpdated(new Date(data.generated_at)); })
+      .then(data => { setWeatherData(data); setLastUpdated(new Date(data.generated_at)); setForecastOffset(0); })
       .catch(err => { console.error(err); setError("Could not load weather data. Please try again."); })
       .finally(() => setLoading(false));
   }, []);
@@ -527,10 +536,15 @@ export default function App() {
       setSelectedHill(null);
   }, [selectedHill, filterAscentsMin, filterAscentsMax, filterRatingMin, filterRatingMax]);
 
-  const sunnyPct = weatherData ? getSunnyPercent(weatherData.grid, maxCloud) : 0;
-  const sunnyhills = weatherData
+  const activeGrid = weatherData?.hourlyGrids?.[forecastOffset] ?? null;
+  const activeWeatherData = weatherData
+    ? { ...weatherData, grid: activeGrid }
+    : null;
+
+  const sunnyPct = activeWeatherData ? getSunnyPercent(activeWeatherData.grid, maxCloud) : 0;
+  const sunnyhills = activeWeatherData
     ? HILLS_DATA.filter(h =>
-      getCloudCoverAtPoint(h.lat, h.lon, weatherData) <= maxCloud
+      getCloudCoverAtPoint(h.lat, h.lon, activeWeatherData) <= maxCloud
       && hillPassesMetricFilters(h, filterAscentsMin, filterAscentsMax, filterRatingMin, filterRatingMax, HILL_METRIC_BOUNDS),
     ).length
     : 0;
@@ -616,9 +630,11 @@ export default function App() {
               </div>
               <div style={{ fontSize: 10, color: "#4a6a8a", marginTop: 4, lineHeight: 1.4 }}>
                 {isDaylight() ? "🌅 Daylight hours" : "🌙 After dark"}{" · "}
-                {lastUpdated
-                  ? lastUpdated.toLocaleString("en-GB", { dateStyle: "short", timeStyle: "short" })
-                  : loading ? "Fetching weather…" : "—"}
+                {forecastOffset > 0 && weatherData
+                  ? `Forecast +${forecastOffset}h · ${new Date().toLocaleString("en-GB", { dateStyle: "short", timeStyle: "short" })}`
+                  : lastUpdated
+                    ? `Current · ${lastUpdated.toLocaleString("en-GB", { dateStyle: "short", timeStyle: "short" })}`
+                    : loading ? "Fetching weather…" : "—"}
               </div>
             </div>
             <button
@@ -650,11 +666,61 @@ export default function App() {
                 borderRight: i < 2 ? "1px solid rgba(255,255,255,0.07)" : "none",
                 background: "rgba(255,255,255,0.02)",
               }}>
-                <div style={{ fontSize: 16, fontWeight: 700, color: "#f5d060", fontFamily: "'DM Serif Display', Georgia, serif", lineHeight: 1 }}>{value}</div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: "#f5d060", fontFamily: "'DM Serif Display', Georgia, serif", lineHeight: 1 }}>
+                  {value}
+                  {forecastOffset > 0 && i < 2 && (
+                    <span style={{ marginLeft: 4, color: "#7ec8ff", fontWeight: 600 }}>
+                      +{forecastOffset}h
+                    </span>
+                  )}
+                </div>
                 <div style={{ fontSize: 9, color: "#4a6a8a", marginTop: 3, textTransform: "uppercase", letterSpacing: "0.07em" }}>{label}</div>
               </div>
             ))}
           </div>
+        </div>
+
+        {/* ── Forecast slider ── */}
+        <div style={{ padding: "14px 16px 0" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 13 }}>🕐</span>
+              <span style={{ fontSize: 10, fontWeight: 600, color: "#a0b0c0", textTransform: "uppercase", letterSpacing: "0.08em" }}>Forecast</span>
+            </div>
+            <div style={{ fontSize: 11, color: "#7ec8ff", fontWeight: 600 }}>
+              {forecastOffset === 0 ? "Now" : `${String((weatherData?.now_hour_utc ?? 0) + forecastOffset).padStart(2, "0")}:00 UTC`}
+            </div>
+          </div>
+
+          <input
+            type="range"
+            min="0"
+            max="10"
+            step="1"
+            value={forecastOffset}
+            onChange={e => setForecastOffset(Number(e.target.value))}
+            style={{ width: "100%", accentColor: "#f5d060" }}
+          />
+
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#4a6a8a", marginTop: 4 }}>
+            <span>Now</span>
+            <span>+10h</span>
+          </div>
+
+          {forecastOffset > 0 && (
+            <div style={{ fontSize: 10, color: "#8899aa", marginTop: 6, lineHeight: 1.4 }}>
+              +{forecastOffset}h ahead · {(() => {
+                const now = new Date();
+                const wraps = (weatherData?.now_hour_utc ?? 0) + forecastOffset >= 24;
+                if (wraps) {
+                  const tomorrow = new Date(now);
+                  tomorrow.setDate(tomorrow.getDate() + 1);
+                  return tomorrow.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+                }
+                return now.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+              })()}
+            </div>
+          )}
         </div>
 
         {/* Scrollable filter body */}
@@ -803,7 +869,10 @@ export default function App() {
           fontSize: 10, color: "#2a4a62", lineHeight: 1.4,
           flexShrink: 0,
         }}>
-          Open-Meteo · Live data · Scotland
+          {forecastOffset > 0
+            ? <span><span style={{ color: "#7ec8ff" }}>🔭 +{forecastOffset}h forecast</span> · Open-Meteo</span>
+            : "Open-Meteo · Live data · Scotland"
+          }
         </div>
       </div>
 
@@ -840,6 +909,23 @@ export default function App() {
       {/* ── MAP ── */}
       <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
 
+        {forecastOffset > 0 && weatherData && (
+          <div style={{
+            position: "absolute", top: 10, left: "50%", transform: "translateX(-50%)",
+            zIndex: 1000, background: "rgba(8,18,32,0.95)",
+            border: "1px solid rgba(255,255,255,0.1)", borderRadius: 20,
+            padding: "6px 14px", fontSize: 12, color: "#d0e0f0",
+            backdropFilter: "blur(8px)", boxShadow: "0 4px 20px rgba(0,0,0,0.4)",
+          }}>
+            🔭 Showing forecast for{" "}
+            <strong style={{ color: "#7ec8ff" }}>
+              {String((weatherData.now_hour_utc + forecastOffset) % 24).padStart(2, "0")}:00 UTC
+            </strong>
+            {" "}· +{forecastOffset}h ahead
+            · data from {lastUpdated?.toLocaleString("en-GB", { timeStyle: "short" }) ?? "—"}
+          </div>
+        )}
+
         {selectedHill && (
           <HillDetailPanel hill={selectedHill} onClose={() => setSelectedHill(null)} />
         )}
@@ -867,11 +953,19 @@ export default function App() {
               </>
             ) : (
               <>
+                <div style={{ fontWeight: 600, marginBottom: 1, color: "#7ec8ff" }}>
+                  {forecastOffset > 0 ? "Forecast" : "Current"}
+                </div>
                 <div style={{ fontWeight: 600, marginBottom: 1, color: "#f5d060" }}>{cloudLabel(hovered.cloudCover)}</div>
                 <div>☁️ Cloud cover: <strong>{hovered.cloudCover}%</strong></div>
                 <div style={{ fontSize: 10, color: "#5a7a9a", marginTop: 1 }}>
                   {hovered.lat.toFixed(2)}°N · {Math.abs(hovered.lon).toFixed(2)}°W
                 </div>
+                {forecastOffset > 0 && (
+                  <div style={{ fontSize: 10, color: "#4a6a8a", marginTop: 2 }}>
+                    Model hour (UTC): {String((weatherData?.now_hour_utc ?? 0) + forecastOffset).padStart(2, "0")}:00
+                  </div>
+                )}
               </>
             )}
           </div>
@@ -881,11 +975,11 @@ export default function App() {
           zoomControl={false} maxBoundsViscosity={1.0} minZoom={6}>
           <TileLayer url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png" attribution='&copy; <a href="https://carto.com">CARTO</a>' />
           <BoundsFitter />
-          {weatherData && (
+          {activeWeatherData && (
             <>
-              <HeatmapOverlay weatherData={weatherData} maxCloud={maxCloud} showAll={showAll} />
+              <HeatmapOverlay weatherData={activeWeatherData} maxCloud={maxCloud} showAll={showAll} />
               <HillsOverlay
-                weatherData={weatherData}
+                weatherData={activeWeatherData}
                 maxCloud={maxCloud}
                 filterAscMin={filterAscentsMin}
                 filterAscMax={filterAscentsMax}
@@ -893,7 +987,7 @@ export default function App() {
                 filterRatMax={filterRatingMax}
               />
               <MouseTracker
-                weatherData={weatherData}
+                weatherData={activeWeatherData}
                 maxCloud={maxCloud}
                 filterAscMin={filterAscentsMin}
                 filterAscMax={filterAscentsMax}

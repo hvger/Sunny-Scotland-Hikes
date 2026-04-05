@@ -35,7 +35,7 @@ LAT_MIN = 54.63
 LAT_MAX = 59.4
 LON_MIN = -7.6
 LON_MAX = -1.6
-STEP = 0.5          # degrees — adjust to taste (0.2 for more points, 0.25 for fewer)
+STEP = 0.15          # degrees — adjust to taste (0.2 for more points, 0.25 for fewer)
 
 # Path to your downloaded GeoJSON file.
 # Place topo_lad.json (or rename to scotland.geojson) next to this file.
@@ -46,6 +46,9 @@ GRID_PATH = Path(__file__).parent / "land_grid.json"
 
 # Weather cache: stores the last fetched data with timestamp
 weather_cache = {}
+
+# Hours ahead for forecast layer (same Open-Meteo hourly run)
+FORECAST_HOURS = 11  # indices 0 (now) through 10 (+10h)
 
 # CORS — in production replace "*" with your actual Render frontend URL
 # e.g. "https://your-app.onrender.com"
@@ -194,10 +197,39 @@ def build_land_grid():
 # Open-Meteo fetch
 # ---------------------------------------------------------------------------
 
-def fetch_cloud_cover(land_points: list[tuple[float, float]]) -> dict:
+def _parse_om_time(s: str) -> datetime:
+    """Parse Open-Meteo hourly time string as UTC."""
+    s = (s or "").strip()
+    if s.endswith("Z"):
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _closest_time_index(times: list[str], target: datetime) -> int:
+    """Index of hourly slot whose time is closest to target."""
+    if not times:
+        raise ValueError("hourly.time is empty")
+    best_i = 0
+    best_diff = None
+    for i, ts in enumerate(times):
+        dt = _parse_om_time(ts)
+        diff = abs((dt - target).total_seconds())
+        if best_diff is None or diff < best_diff:
+            best_diff = diff
+            best_i = i
+    return best_i
+
+
+def fetch_cloud_cover(land_points: list[tuple[float, float]]) -> tuple[list[dict], int]:
     """
-    Fetch hourly cloud cover for all land grid points in a single
-    Open-Meteo request. Returns a dict mapping (lat, lon) → cloud_cover (0-100).
+    Fetch hourly cloud cover for all land grid points in one Open-Meteo request.
+
+    Returns tuple of:
+      - list of 11 dicts: each dict maps (lat, lon) → int 0–100 for that hour offset
+      - now_hour: current UTC hour (0-23)
     """
     if not land_points:
         raise HTTPException(status_code=500, detail="No land grid points available")
@@ -206,35 +238,36 @@ def fetch_cloud_cover(land_points: list[tuple[float, float]]) -> dict:
     lons = ",".join(str(p[1]) for p in land_points)
 
     url = (
-        f"https://api.open-meteo.com/v1/forecast"
+        "https://api.open-meteo.com/v1/forecast"
         f"?latitude={lats}&longitude={lons}"
-        f"&hourly=cloud_cover"
+        "&hourly=cloud_cover"
     )
 
     try:
-        with urllib.request.urlopen(url, timeout=30) as response:
+        with urllib.request.urlopen(url, timeout=60) as response:
             data = json.loads(response.read())
     except Exception as e:
         raise HTTPException(
             status_code=502,
-            detail=f"Open-Meteo request failed: {e}"
-        )
+            detail=f"Open-Meteo request failed: {e}",
+        ) from e
 
-    # Open-Meteo returns an array when multiple locations are requested
     results = data if isinstance(data, list) else [data]
-
-    # Pick the value at the current UTC hour
     now_hour = datetime.now(timezone.utc).hour
 
-    cover_map = {}
+    # Build one cover map per hour offset
+    hourly_maps = [{} for _ in range(FORECAST_HOURS)]
+
     for i, point in enumerate(land_points):
         try:
-            cover = results[i]["hourly"]["cloud_cover"][now_hour]
-            cover_map[point] = round(float(cover))
+            hourly = results[i]["hourly"]["cloud_cover"]
+            for offset in range(FORECAST_HOURS):
+                hourly_maps[offset][point] = round(float(hourly[now_hour + offset]))
         except (IndexError, KeyError, TypeError):
-            cover_map[point] = 100  # default to overcast if missing
+            for offset in range(FORECAST_HOURS):
+                hourly_maps[offset][point] = 100
 
-    return cover_map
+    return hourly_maps, now_hour
 
 
 # ---------------------------------------------------------------------------
@@ -262,12 +295,15 @@ def cloud_cover():
     Returns cloud cover data for all Scottish land grid points.
     Caches data for 30 minutes to reduce API calls.
 
-    Response shape (mirrors what the React app already expects):
+    Response includes hourly points for 0 to +10h ahead.
     {
-        "step": 0.25,
-        "generated_at": "2024-01-01T12:00:00Z",
-        "points": [
-            { "lat": 55.5, "lon": -4.5, "cloud_cover": 42 },
+        "step": 0.15,
+        "generated_at": "...",
+        "now_hour_utc": 14,
+        "forecast_hours": 11,
+        "hourly_points": [
+            [ { "lat", "lon", "cloud_cover" }, ... ],  # offset 0
+            [ { "lat", "lon", "cloud_cover" }, ... ],  # offset 1
             ...
         ]
     }
@@ -285,17 +321,22 @@ def cloud_cover():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    cover_map = fetch_cloud_cover(land_points)
+    hourly_maps, now_hour = fetch_cloud_cover(land_points)
 
-    points = [
-        {"lat": lat, "lon": lon, "cloud_cover": cover_map.get((lat, lon), 100)}
-        for lat, lon in land_points
+    hourly_points = [
+        [
+            {"lat": lat, "lon": lon, "cloud_cover": hourly_maps[offset].get((lat, lon), 100)}
+            for lat, lon in land_points
+        ]
+        for offset in range(FORECAST_HOURS)
     ]
 
     data = {
         "step": STEP,
         "generated_at": now.isoformat(),
-        "points": points,
+        "now_hour_utc": now_hour,
+        "forecast_hours": FORECAST_HOURS,
+        "hourly_points": hourly_points,
     }
 
     # Cache the data
@@ -305,18 +346,15 @@ def cloud_cover():
     return data
 
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.get("/grid-preview")
 def grid_preview():
     """
-    Returns just the land grid points with no weather data.
-    Useful for visually checking the grid in the browser or a GeoJSON viewer.
+    Land grid points only (no weather). For debugging / GeoJSON viewers.
     """
     try:
         land_points = build_land_grid()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     return {
         "type": "FeatureCollection",
@@ -333,4 +371,5 @@ def grid_preview():
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

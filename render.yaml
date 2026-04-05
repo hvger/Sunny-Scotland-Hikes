@@ -3,17 +3,17 @@
 # Defines both services in one file so Render deploys them together.
 # Commit this to the ROOT of your GitHub repository.
 #
-# Repository structure expected:
+# Repository structure (Vite app at repo root):
 #   /
-#   ├── render.yaml            <- this file
-#   ├── backend/
-#   │   ├── main.py
-#   │   ├── requirements.txt
-#   │   └── scotland.geojson
-#   └── frontend/
-#       ├── src/
-#       ├── package.json
-#       └── ...
+#   ├── render.yaml
+#   ├── package.json
+#   ├── src/
+#   ├── dist/                  <- build output
+#   └── backend/
+#       ├── main.py
+#       ├── requirements.txt
+#       ├── land_grid.json
+#       └── scotland.geojson
 
 services:
 
@@ -29,13 +29,13 @@ services:
       - key: FRONTEND_URL
         value: https://scotland-weather.onrender.com  # update to your frontend URL
 
-  # --- React frontend (static site) ---
+  # --- React frontend (static site, Vite at repository root) ---
   - type: web
     name: scotland-weather
     env: static
-    rootDir: frontend
+    rootDir: .
     buildCommand: npm install && npm run build
-    staticPublishPath: dist           # use "build" if you're using Create React App
+    staticPublishPath: dist
     envVars:
       - key: VITE_API_URL             # use REACT_APP_API_URL for Create React App
         value: https://scotland-weather-api.onrender.com
