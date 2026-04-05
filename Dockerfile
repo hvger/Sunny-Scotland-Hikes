@@ -25,7 +25,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the backend source
 COPY backend/main.py .
 COPY backend/scotland.geojson .
-COPY backendland_grid.json .
+COPY backend/land_grid.json .
 
 # Copy the built frontend from Stage 1
 COPY --from=frontend-build /app/dist ./dist
