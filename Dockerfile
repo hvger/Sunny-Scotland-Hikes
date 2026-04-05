@@ -16,7 +16,7 @@ RUN npm run build
 # ── Stage 2: Python backend ─────────────────────────────────────────────────
 FROM python:3.11-slim
 
-WORKDIR /app
+WORKDIR /backend
 
 # Install Python dependencies
 COPY requirements.txt .
