@@ -14,8 +14,11 @@ The frontend should call:
     GET http://localhost:8000/cloud-cover
 """
 
+import asyncio
 import json
 import os
+import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone, timedelta
 from functools import lru_cache
@@ -200,6 +203,34 @@ def build_land_grid():
 # Open-Meteo fetch
 # ---------------------------------------------------------------------------
 
+# Prevents simultaneous fetches when the cache expires under concurrent load
+_fetch_lock = asyncio.Lock()
+
+
+def _fetch_with_retry(url: str, retries: int = 3, backoff: float = 2.0) -> object:
+    """
+    Fetch a URL with exponential backoff on 429 Too Many Requests.
+    Identifies the app to Open-Meteo as recommended for non-commercial use.
+    """
+    headers = {
+        "User-Agent": "ScotlandSunshineApp/1.0 (non-commercial, personal project)",
+        "Accept": "application/json",
+    }
+    req = urllib.request.Request(url, headers=headers)
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                return json.loads(response.read())
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < retries - 1:
+                wait = backoff * (2 ** attempt)
+                print(f"[rate limit] 429 from Open-Meteo, retrying in {wait}s (attempt {attempt + 1}/{retries})...")
+                time.sleep(wait)
+            else:
+                raise
+    # Should never reach here, but satisfies type checkers
+    raise RuntimeError("Exhausted retries")
+
 def _parse_om_time(s: str) -> datetime:
     """Parse Open-Meteo hourly time string as UTC."""
     s = (s or "").strip()
@@ -247,8 +278,12 @@ def fetch_cloud_cover(land_points: list[tuple[float, float]]) -> tuple[list[dict
     )
 
     try:
-        with urllib.request.urlopen(url, timeout=60) as response:
-            data = json.loads(response.read())
+        data = _fetch_with_retry(url)
+    except urllib.error.HTTPError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Open-Meteo request failed: HTTP Error {e.code}: {e.reason}",
+        ) from e
     except Exception as e:
         raise HTTPException(
             status_code=502,
@@ -293,10 +328,13 @@ def health():
 
 
 @app.get("/cloud-cover")
-def cloud_cover():
+async def cloud_cover():
     """
     Returns cloud cover data for all Scottish land grid points.
     Caches data for 30 minutes to reduce API calls.
+
+    The async lock prevents simultaneous Open-Meteo fetches when the cache
+    expires under concurrent load — only one fetch fires at a time.
 
     Response includes hourly points for 0 to +10h ahead.
     {
@@ -313,40 +351,52 @@ def cloud_cover():
     """
     now = datetime.now(timezone.utc)
     cache_key = "cloud_cover"
+
+    # Check cache before acquiring the lock — fast path for cached responses
     if cache_key in weather_cache:
         cached_time, cached_data = weather_cache[cache_key]
         if now - cached_time < timedelta(minutes=30):
             print(f"[cache] Serving cached weather data from {cached_time}")
             return cached_data
 
-    try:
-        land_points = build_land_grid()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # Acquire lock so only one coroutine fetches from Open-Meteo at a time
+    async with _fetch_lock:
+        # Re-check cache inside the lock in case another coroutine just
+        # populated it while we were waiting
+        now = datetime.now(timezone.utc)
+        if cache_key in weather_cache:
+            cached_time, cached_data = weather_cache[cache_key]
+            if now - cached_time < timedelta(minutes=30):
+                print(f"[cache] Serving freshly populated cache after lock wait")
+                return cached_data
 
-    hourly_maps, now_hour = fetch_cloud_cover(land_points)
+        try:
+            land_points = build_land_grid()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
-    hourly_points = [
-        [
-            {"lat": lat, "lon": lon, "cloud_cover": hourly_maps[offset].get((lat, lon), 100)}
-            for lat, lon in land_points
+        hourly_maps, now_hour = fetch_cloud_cover(land_points)
+
+        hourly_points = [
+            [
+                {"lat": lat, "lon": lon, "cloud_cover": hourly_maps[offset].get((lat, lon), 100)}
+                for lat, lon in land_points
+            ]
+            for offset in range(FORECAST_HOURS)
         ]
-        for offset in range(FORECAST_HOURS)
-    ]
 
-    data = {
-        "step": STEP,
-        "generated_at": now.isoformat(),
-        "now_hour_utc": now_hour,
-        "forecast_hours": FORECAST_HOURS,
-        "hourly_points": hourly_points,
-    }
+        data = {
+            "step": STEP,
+            "generated_at": now.isoformat(),
+            "now_hour_utc": now_hour,
+            "forecast_hours": FORECAST_HOURS,
+            "hourly_points": hourly_points,
+        }
 
-    # Cache the data
-    weather_cache[cache_key] = (now, data)
-    print(f"[cache] Fetched and cached new weather data at {now}")
+        weather_cache[cache_key] = (now, data)
+        print(f"[cache] Fetched and cached new weather data at {now}")
 
-    return data
+        return data
 
 
 @app.get("/grid-preview")
