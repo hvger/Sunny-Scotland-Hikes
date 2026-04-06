@@ -56,6 +56,11 @@ weather_cache = {}
 # Hours ahead for forecast layer (same Open-Meteo hourly run)
 FORECAST_HOURS = 11  # indices 0 (now) through 10 (+10h)
 
+# Open-Meteo batching — split land points into chunks to avoid 429s on
+# shared cloud IPs. 50 points per request is well under rate limits.
+CHUNK_SIZE = 50
+CHUNK_DELAY = 0.15  # seconds between chunks
+
 # CORS — in production replace "*" with your actual Render frontend URL
 # e.g. "https://your-app.onrender.com"
 ALLOWED_ORIGINS = os.getenv("FRONTEND_URL", "*").split(",")
@@ -259,7 +264,9 @@ def _closest_time_index(times: list[str], target: datetime) -> int:
 
 def fetch_cloud_cover(land_points: list[tuple[float, float]]) -> tuple[list[dict], int]:
     """
-    Fetch hourly cloud cover for all land grid points in one Open-Meteo request.
+    Fetch hourly cloud cover for all land grid points using chunked sequential
+    requests to Open-Meteo. Splitting into small chunks avoids 429 rate limit
+    errors on shared cloud IPs where a single 499-point request gets rejected.
 
     Returns tuple of:
       - list of 11 dicts: each dict maps (lat, lon) → int 0–100 for that hour offset
@@ -268,43 +275,55 @@ def fetch_cloud_cover(land_points: list[tuple[float, float]]) -> tuple[list[dict
     if not land_points:
         raise HTTPException(status_code=500, detail="No land grid points available")
 
-    lats = ",".join(str(p[0]) for p in land_points)
-    lons = ",".join(str(p[1]) for p in land_points)
-
-    url = (
-        "https://api.open-meteo.com/v1/forecast"
-        f"?latitude={lats}&longitude={lons}"
-        "&hourly=cloud_cover"
-    )
-
-    try:
-        data = _fetch_with_retry(url)
-    except urllib.error.HTTPError as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Open-Meteo request failed: HTTP Error {e.code}: {e.reason}",
-        ) from e
-    except Exception as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Open-Meteo request failed: {e}",
-        ) from e
-
-    results = data if isinstance(data, list) else [data]
     now_hour = datetime.now(timezone.utc).hour
-
-    # Build one cover map per hour offset
     hourly_maps = [{} for _ in range(FORECAST_HOURS)]
 
-    for i, point in enumerate(land_points):
-        try:
-            hourly = results[i]["hourly"]["cloud_cover"]
-            for offset in range(FORECAST_HOURS):
-                hourly_maps[offset][point] = round(float(hourly[now_hour + offset]))
-        except (IndexError, KeyError, TypeError):
-            for offset in range(FORECAST_HOURS):
-                hourly_maps[offset][point] = 100
+    # Split points into chunks to stay within Open-Meteo rate limits
+    chunks = [
+        land_points[i : i + CHUNK_SIZE]
+        for i in range(0, len(land_points), CHUNK_SIZE)
+    ]
+    print(f"[fetch] {len(land_points)} points → {len(chunks)} chunks of ≤{CHUNK_SIZE}")
 
+    for chunk_idx, chunk in enumerate(chunks):
+        lats = ",".join(str(p[0]) for p in chunk)
+        lons = ",".join(str(p[1]) for p in chunk)
+
+        url = (
+            "https://api.open-meteo.com/v1/forecast"
+            f"?latitude={lats}&longitude={lons}"
+            "&hourly=cloud_cover"
+        )
+
+        try:
+            data = _fetch_with_retry(url)
+        except urllib.error.HTTPError as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Open-Meteo request failed on chunk {chunk_idx + 1}/{len(chunks)}: HTTP Error {e.code}: {e.reason}",
+            ) from e
+        except Exception as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Open-Meteo request failed on chunk {chunk_idx + 1}/{len(chunks)}: {e}",
+            ) from e
+
+        results = data if isinstance(data, list) else [data]
+
+        for i, point in enumerate(chunk):
+            try:
+                hourly = results[i]["hourly"]["cloud_cover"]
+                for offset in range(FORECAST_HOURS):
+                    hourly_maps[offset][point] = round(float(hourly[now_hour + offset]))
+            except (IndexError, KeyError, TypeError):
+                for offset in range(FORECAST_HOURS):
+                    hourly_maps[offset][point] = 100
+
+        # Polite pause between chunks — prevents burst rate limiting
+        if chunk_idx < len(chunks) - 1:
+            time.sleep(CHUNK_DELAY)
+
+    print(f"[fetch] Completed all {len(chunks)} chunks successfully")
     return hourly_maps, now_hour
 
 
