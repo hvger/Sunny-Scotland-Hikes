@@ -619,7 +619,7 @@ export default function App() {
         </div>
       )}
 
-      {/* ── SIDEBAR WRAPPER: positions sidebar + toggle together so toggle always tracks the sidebar edge ── */}
+      {/* ── SIDEBAR WRAPPER ── */}
       <div style={{
         position: isMobile ? "fixed" : "relative",
         top: isMobile ? 0 : undefined,
@@ -629,14 +629,10 @@ export default function App() {
         display: "flex",
         flexDirection: "row",
         flexShrink: 0,
-        // On mobile: slide the whole panel off-screen left when closed
-        // On desktop: width is animated via the inner sidebar width
         transform: isMobile && !sidebarOpen ? "translateX(-300px)" : "translateX(0)",
-        transition: isMobile ? "transform 0.25s ease" : undefined,
-        // On desktop, shrink to 0 when closed so the map fills the space
         width: isMobile ? 300 : (sidebarOpen ? 300 : 0),
         minWidth: isMobile ? 300 : (sidebarOpen ? 300 : 0),
-        overflow: isMobile ? undefined : "visible",
+        overflow: "hidden",
         transition: "transform 0.25s ease, width 0.25s ease, min-width 0.25s ease",
       }}>
 
@@ -915,39 +911,40 @@ export default function App() {
           }
         </div>
       </div>{/* end sidebar */}
-
-      {/* ── SIDEBAR TOGGLE: anchored to the right edge of the sidebar via relative positioning ── */}
-      <button
-        onClick={() => setSidebarOpen(v => !v)}
-        title={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
-        style={{
-          position: "absolute",
-          right: -22,
-          top: "50%",
-          transform: "translateY(-50%)",
-          zIndex: 1100,
-          width: 22,
-          height: 44,
-          borderRadius: sidebarOpen ? "0 8px 8px 0" : "8px",
-          border: "1px solid rgba(255,255,255,0.1)",
-          borderLeft: sidebarOpen ? "none" : "1px solid rgba(255,255,255,0.1)",
-          background: "rgba(8,18,32,0.95)",
-          color: "#5a7a9a",
-          cursor: "pointer",
-          fontSize: 12,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          backdropFilter: "blur(8px)",
-          boxShadow: "2px 0 12px rgba(0,0,0,0.3)",
-          padding: 0,
-          flexShrink: 0,
-        }}
-      >
-        {sidebarOpen ? "‹" : "›"}
-      </button>
-
       </div>{/* end sidebar wrapper */}
+
+      {/* ── DESKTOP SIDEBAR TOGGLE: fixed position tracking sidebar width ── */}
+      {!isMobile && (
+        <button
+          onClick={() => setSidebarOpen(v => !v)}
+          title={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
+          style={{
+            position: "fixed",
+            left: sidebarOpen ? 300 : 0,
+            top: "50%",
+            transform: "translateY(-50%)",
+            zIndex: 1100,
+            width: 22,
+            height: 44,
+            borderRadius: "0 8px 8px 0",
+            border: "1px solid rgba(255,255,255,0.1)",
+            borderLeft: "none",
+            background: "rgba(8,18,32,0.95)",
+            color: "#5a7a9a",
+            cursor: "pointer",
+            fontSize: 12,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            backdropFilter: "blur(8px)",
+            boxShadow: "2px 0 12px rgba(0,0,0,0.3)",
+            padding: 0,
+            transition: "left 0.25s ease",
+          }}
+        >
+          {sidebarOpen ? "‹" : "›"}
+        </button>
+      )}
 
       {/* Mobile backdrop: tap to close sidebar */}
       {isMobile && sidebarOpen && (
@@ -961,7 +958,7 @@ export default function App() {
         />
       )}
 
-      {/* Mobile toggle button: always visible in top-left when sidebar is closed on mobile */}
+      {/* Mobile hamburger: visible when sidebar is closed */}
       {isMobile && !sidebarOpen && (
         <button
           onClick={() => setSidebarOpen(true)}
