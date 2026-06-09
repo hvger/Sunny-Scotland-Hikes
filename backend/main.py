@@ -23,11 +23,9 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from shapely.geometry import shape, Point
 from shapely.ops import unary_union
-
-from pathlib import Path
-from fastapi.staticfiles import StaticFiles
 
 # ---------------------------------------------------------------------------
 # Config
@@ -226,17 +224,16 @@ def _closest_time_index(times: list[str], target: datetime) -> int:
     return best_i
 
 
-def fetch_cloud_cover(land_points: list[tuple[float, float]]) -> tuple[list[dict], int]:
-    """
-    Fetch hourly cloud cover for all land grid points in one Open-Meteo request.
+def _chunked(iterable, size: int):
+    for i in range(0, len(iterable), size):
+        yield iterable[i:i + size]
 
-    Returns tuple of:
-      - list of 11 dicts: each dict maps (lat, lon) → int 0–100 for that hour offset
-      - now_hour: current UTC hour (0-23)
-    """
-    if not land_points:
-        raise HTTPException(status_code=500, detail="No land grid points available")
 
+def _build_fallback_payload() -> dict:
+    return {"hourly": {"cloud_cover": [100] * 48}}
+
+
+def _fetch_open_meteo_chunk(land_points: list[tuple[float, float]], timeout: int = 45) -> list[dict]:
     lats = ",".join(str(p[0]) for p in land_points)
     lons = ",".join(str(p[1]) for p in land_points)
 
@@ -246,24 +243,47 @@ def fetch_cloud_cover(land_points: list[tuple[float, float]]) -> tuple[list[dict
         "&hourly=cloud_cover"
     )
 
-    try:
-        with urllib.request.urlopen(url, timeout=60) as response:
-            data = json.loads(response.read())
-    except Exception as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Open-Meteo request failed: {e}",
-        ) from e
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "SunnyScotlandApp/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = response.read().decode("utf-8")
 
-    results = data if isinstance(data, list) else [data]
+    data = json.loads(payload)
+    return data if isinstance(data, list) else [data]
+
+
+def fetch_cloud_cover(land_points: list[tuple[float, float]]) -> tuple[list[dict], int]:
+    """
+    Fetch hourly cloud cover for all land grid points in small Open-Meteo batches.
+
+    Returns tuple of:
+      - list of 11 dicts: each dict maps (lat, lon) → int 0–100 for that hour offset
+      - now_hour: current UTC hour (0-23)
+    """
+    if not land_points:
+        raise HTTPException(status_code=500, detail="No land grid points available")
+
     now_hour = datetime.now(timezone.utc).hour
-
-    # Build one cover map per hour offset
     hourly_maps = [{} for _ in range(FORECAST_HOURS)]
+    batch_size = 100
+    fetched_payloads: list[dict] = []
 
-    for i, point in enumerate(land_points):
+    for chunk in _chunked(land_points, batch_size):
         try:
-            hourly = results[i]["hourly"]["cloud_cover"]
+            fetched_payloads.extend(_fetch_open_meteo_chunk(chunk))
+        except Exception as exc:
+            print(f"[weather] Open-Meteo batch failed: {exc}")
+            fetched_payloads.extend([_build_fallback_payload() for _ in chunk])
+
+    if len(fetched_payloads) < len(land_points):
+        missing = len(land_points) - len(fetched_payloads)
+        fetched_payloads.extend([_build_fallback_payload() for _ in range(missing)])
+
+    for point_index, point in enumerate(land_points):
+        try:
+            hourly = fetched_payloads[point_index]["hourly"]["cloud_cover"]
             for offset in range(FORECAST_HOURS):
                 hourly_maps[offset][point] = round(float(hourly[now_hour + offset]))
         except (IndexError, KeyError, TypeError):
@@ -324,7 +344,20 @@ def cloud_cover():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    hourly_maps, now_hour = fetch_cloud_cover(land_points)
+    try:
+        hourly_maps, now_hour = fetch_cloud_cover(land_points)
+    except HTTPException as exc:
+        if weather_cache.get(cache_key):
+            _, cached_data = weather_cache[cache_key]
+            print(f"[cache] Returning cached weather data after upstream failure: {exc.detail}")
+            return cached_data
+        raise
+    except Exception as exc:
+        if weather_cache.get(cache_key):
+            _, cached_data = weather_cache[cache_key]
+            print(f"[cache] Returning cached weather data after unexpected failure: {exc}")
+            return cached_data
+        raise HTTPException(status_code=502, detail=f"Open-Meteo request failed: {exc}") from exc
 
     hourly_points = [
         [
